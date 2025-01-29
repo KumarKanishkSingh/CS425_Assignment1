@@ -159,31 +159,101 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <algorithm> // Added for std::remove_if
+#include <fstream>
 
 #define BUFFER_SIZE 1024
-#define MAX_CLIENTS 2
+#define MAX_CLIENTS 4
 #define PORT 12345
 
 std::mutex cout_mutex;
 std::mutex clients_mutex;
 
-// Structure to hold client information
-struct ClientInfo {
-    int socket;
-    std::string username;
-};
+// // Structure to hold client information
+// struct ClientInfo {
+//     int socket;
+//     std::string username;
+// };
 
-// List of connected clients
-std::vector<ClientInfo> clients;
+// // List of connected clients
+// std::vector<ClientInfo> clients;
+
+std :: unordered_map < int , std :: string > clients ; // Clientsocket -> username
+std :: unordered_map < std :: string , int> sock ; // Username -> Clientsocket -> 
+std :: unordered_map < std :: string , std :: string > user_credentials ; //Username -> password
+std :: unordered_map < std :: string , std :: unordered_set < int > >groups ; // Group -> client sockets
+
+void create_group(std::string gname,int client_socket){
+    groups[gname].insert(client_socket);
+    std::cout<<"Group "<<gname<<" Created"<<std::endl;
+    return;
+}
+void join_group(std::string gname,int client_socket){
+    groups[gname].insert(client_socket);
+    std::cout<<"Group "<<gname<<" joined"<<std::endl;
+    return;
+}
+void leave_group(std::string gname,int client_socket){
+    groups[gname].erase(client_socket);
+    std::cout<<"Group "<<gname<<" left"<<std::endl;
+    return;
+}
+
+void load_users_from_file(const std::string& filename) {
+    std::ifstream file(filename);
+    
+    if (!file.is_open()) {
+        std::cerr << "Error: Unable to open file " << filename << std::endl;
+        return;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string username, password;
+
+        size_t delimiter_pos = line.find(':');
+        if (delimiter_pos != std::string::npos) {
+            username = line.substr(0, delimiter_pos);
+            password = line.substr(delimiter_pos + 1);
+            user_credentials[username] = password; // Store in the map
+        }
+    }
+
+    file.close();
+}
+
+bool Authenticating_user(const std::string Username,const std::string Password){
+    if(user_credentials.count(Username) && user_credentials[Username]==Password)return true;
+    return false;
+}
 
 // Function to broadcast a message to all clients except the sender
 void broadcast_message(const std::string& message, int sender_socket) {
     std::lock_guard<std::mutex> lock(clients_mutex);
     for (const auto& client : clients) {
-        if (client.socket != sender_socket) {
-            if (send(client.socket, message.c_str(), message.size(), 0) < 0) {
+        if (client.first != sender_socket) {
+            if (send(client.first, message.c_str(), message.size(), 0) < 0) {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cerr << "Error sending message to client " << client.username << std::endl;
+                std::cerr << "Error sending message to client " << client.second << std::endl;
+            }
+        }
+    }
+}
+void direct_message(const std::string& message, int client_socket) {
+    std::lock_guard<std::mutex> lock(clients_mutex);
+    
+            if (send(client_socket, message.c_str(), message.size(), 0) < 0) {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cerr << "Error sending message to client " << clients[client_socket] << std::endl;
+            }
+}
+void group_message(std::string gname,const std::string& message, int sender_socket) {
+    std::lock_guard<std::mutex> lock(clients_mutex);
+    for (const auto& client : groups[gname]) {
+        if (client != sender_socket) {
+            if (send(client, message.c_str(), message.size(), 0) < 0) {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cerr << "Error sending message to client " << clients[client] << std::endl;
             }
         }
     }
@@ -240,7 +310,7 @@ void handle_client(int client_socket){
     password.erase(password.find_last_not_of("\n\r") + 1); // Trim newline characters
 
     // Simple authentication check (accept any username/password)
-    bool is_authenticated = true; // Replace with actual authentication logic
+    bool is_authenticated = Authenticating_user(username,password); // Replace with actual authentication logic
 
     if (is_authenticated) {
         std::string welcome_msg = "Welcome to the server, " + username + "!\n";
@@ -254,62 +324,94 @@ void handle_client(int client_socket){
         // Add client to the list of connected clients
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
-            clients.push_back(ClientInfo{client_socket, username});
+            clients[client_socket]=username;
+            sock[username]=client_socket;
         }
 
         // Notify other clients about the new connection
         std::string join_msg = username + " has joined the chat.\n";
         broadcast_message(join_msg, client_socket);
 
+        // if(groups.empty())
+            // {
+                create_group("G1",client_socket);
+            // }
+            // else
+            // {
+                join_group("G1",client_socket);
+            // }
+
         // Start receiving messages from the client
         while (true) {
             memset(buffer, 0, BUFFER_SIZE);
             int recv_bytes = recv(client_socket, buffer, BUFFER_SIZE, 0);
-            if (recv_bytes <= 0) {
-                // Client disconnected
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << username << " disconnected." << std::endl;
-                close(client_socket);
+            // if (recv_bytes <= 0) {
+            //     // Client disconnected
+            //     std::lock_guard<std::mutex> lock(cout_mutex);
+            //     std::cout << username << " disconnected." << std::endl;
+            //     close(client_socket);
 
-                // Remove client from the list
-                {
-                    std::lock_guard<std::mutex> lock(clients_mutex);
-                    clients.erase(std::remove_if(clients.begin(), clients.end(),
-                        [&](const ClientInfo& c) { return c.socket == client_socket; }),
-                        clients.end());
-                }
+            //     // Remove client from the list
+            //     {
+            //         std::lock_guard<std::mutex> lock(clients_mutex);
+            //         clients.erase(std::remove_if(clients.begin(), clients.end(),
+            //             // [&](const ClientInfo& c) { return c.socket == client_socket; }),
+            //             // clients.end());
+            //             [&](const std::pair<int,std :: string >& c) { return c.first == client_socket; }),
+            //             clients.end());
+            //     }
 
-                // Notify other clients about the disconnection
-                std::string leave_msg = username + " has left the chat.\n";
-                broadcast_message(leave_msg, client_socket);
-                break;
-            }
+            //     // Notify other clients about the disconnection
+            //     std::string leave_msg = username + " has left the chat.\n";
+            //     broadcast_message(leave_msg, client_socket);
+            //     break;
+            // }
+            
 
             std::string message = std::string(buffer);
             message.erase(message.find_last_not_of("\n\r") + 1); // Trim newline characters
 
-            if (message == "/exit") {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << username << " has exited the chat." << std::endl;
-                close(client_socket);
+            // if (message == "/exit") {
+            //     std::lock_guard<std::mutex> lock(cout_mutex);
+            //     std::cout << username << " has exited the chat." << std::endl;
+            //     close(client_socket);
 
-                // Remove client from the list
-                {
-                    std::lock_guard<std::mutex> lock(clients_mutex);
-                    clients.erase(std::remove_if(clients.begin(), clients.end(),
-                        [&](const ClientInfo& c) { return c.socket == client_socket; }),
-                        clients.end());
-                }
+            //     // Remove client from the list
+            //     {
+            //         std::lock_guard<std::mutex> lock(clients_mutex);
+            //         clients.erase(std::remove_if(clients.begin(), clients.end(),
+            //             [&](const std::pair<int,std :: string >& c) { return c.first == client_socket; }),
+            //             clients.end());
+            //     }
 
-                // Notify other clients about the disconnection
-                std::string exit_msg = username + " has left the chat.\n";
-                broadcast_message(exit_msg, client_socket);
-                break;
-            }
-
-            // Prepend username to the message
-            std::string formatted_message = username + ": " + message + "\n";
-            broadcast_message(formatted_message, client_socket);
+            //     // Notify other clients about the disconnection
+            //     std::string exit_msg = username + " has left the chat.\n";
+            //     broadcast_message(exit_msg, client_socket);
+            //     break;
+            // }
+            if(message[0]=='1')
+            {
+                direct_message(message,client_socket);
+                
+            } 
+            else if(message[0]=='2')
+            {
+                // direct_message(message,client_socket);
+                // Prepend username to the message
+                std::string formatted_message = username + ": " + message + "\n";
+                broadcast_message(formatted_message, client_socket);
+                
+            } 
+            else if(message[0]=='3')
+            {
+                // direct_message(message,client_socket);
+                // Prepend username to the message
+                std::string formatted_message = username + ": " + message + "\n";
+                group_message("G1",formatted_message, client_socket);
+                
+            } 
+            // memset(buffer, 0, BUFFER_SIZE);
+            
         }
     } else {
         std::string fail_msg = "Authentication Failed\n";
@@ -367,6 +469,8 @@ int main() {
         std::lock_guard<std::mutex> lock(cout_mutex);
         std::cout << "Server is listening on port " << PORT << "..." << std::endl;
     }
+
+    load_users_from_file("users.txt");
 
     // Vector to hold client threads
     std::vector<std::thread> client_threads;
